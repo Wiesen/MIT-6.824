@@ -1,0 +1,114 @@
+package mapreduce
+
+import "container/list"
+import "fmt"
+
+/* Added by Yang */
+import (
+	"log"
+	"strconv"
+)
+
+type WorkerInfo struct {
+	address string
+	// You can add definitions here.
+}
+
+// Clean up all workers by sending a Shutdown RPC to each one of them Collect
+// the number of jobs each work has performed.
+func (mr *MapReduce) KillWorkers() *list.List {
+	l := list.New()
+	for _, w := range mr.Workers {
+		DPrintf("DoWork: shutdown %s\n", w.address)
+		args := &ShutdownArgs{}
+		var reply ShutdownReply
+		ok := call(w.address, "Worker.Shutdown", args, &reply)
+		if ok == false {
+			fmt.Printf("DoWork: RPC %s shutdown error\n", w.address)
+		} else {
+			l.PushBack(reply.Njobs)
+		}
+	}
+	return l
+}
+
+/*
+func HandOutJob(WorkerAddress string, file string, opt JobType, nJobNumber int, nTotalNumber int) {
+}
+*/
+
+// 1. The master should communicate with the workers via RPC.(go statement)
+// 2. Hand out the map and reduce jobs to workers,
+//    and return only when all the jobs have finished.
+// 3. RunMaster only needs to tell the workers
+//    the name of the original input file (mr.file) and the job number
+// 4. Your RunMaster should process new worker registrations by
+//    reading from mr.registerChannel
+// 5. Modify the MapReduce struct to keep track of any additional state
+//    and initialize this additional state in the InitMapReduce() function.
+func (mr *MapReduce) RunMaster() *list.List {
+	// Your code here
+	// read from channel and phase as wk, use `go` to send wk DoJob,
+	// *Modify the MapReduce struct to keep track of any additional state
+	// wait for a worker to finish before handing out more jobs (channel),
+	// finally wait all the jobs finished before return
+	
+	// if the master's RPC to the worker fails. the master should re-assign
+	// the job given to the failed worker to another worker
+    
+	nWorkerNumber := 0
+	go func() {
+		for true {
+			WorkerAddress := <-mr.registerChannel
+			mr.Workers[strconv.Itoa(nWorkerNumber)] = &WorkerInfo{WorkerAddress}
+			nWorkerNumber++
+			mr.workerChannel <- WorkerAddress
+		}
+	}()
+	
+    cFinishedChannel := make(chan bool)
+	log.Printf("Hand out map job\n")
+	go func() {
+	    cJobNumberChannel := make(chan int, mr.nMap)
+	    for i := 0; i < mr.nMap; i++ {
+	        WorkerAddress := <-mr.workerChannel
+	        cJobNumberChannel <- i
+	        go func(){
+	            nJobNumber := <- cJobNumberChannel
+        	    args := &DoJobArgs{mr.file, Map, nJobNumber, mr.nReduce}
+	            var reply DoJobReply
+	            ok := call(WorkerAddress, "Worker.DoJob", args, &reply)
+	            if ok == false {
+		            fmt.Printf("HandOutJob: RPC %s DoJob on %s error\n", WorkerAddress, Map)
+	            }
+	            mr.workerChannel <-WorkerAddress
+            }()
+	    }
+	    cFinishedChannel <- true
+    }()
+	<- cFinishedChannel
+
+	log.Printf("Hand out reduce job\n")
+	go func() {
+	    cJobNumberChannel := make(chan int, mr.nReduce)
+	    for i := 0; i < mr.nReduce; i++ {
+	        WorkerAddress := <-mr.workerChannel
+	        cJobNumberChannel <- i
+	        go func(){
+	            nJobNumber := <- cJobNumberChannel
+        	    args := &DoJobArgs{mr.file, Reduce, nJobNumber, mr.nMap}
+	            var reply DoJobReply
+	            ok := call(WorkerAddress, "Worker.DoJob", args, &reply)
+	            if ok == false {
+		            fmt.Printf("HandOutJob: RPC %s DoJob on %s error\n", WorkerAddress, Reduce)
+	            }
+	            mr.workerChannel <-WorkerAddress
+            }()
+        }
+		cFinishedChannel <- true
+	}()
+    <- cFinishedChannel
+
+	log.Printf("Kill workers and return\n")
+	return mr.KillWorkers()
+}
