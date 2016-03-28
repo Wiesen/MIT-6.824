@@ -1,16 +1,27 @@
 package pbservice
 
+//1. Modify client.go so that clients keep re-trying until they get an answer.
+//   Make sure that you include enough information in PutAppendArgs, and GetArgs (see common.go)
+//   so that the key/value service can detect duplicates.
+//   Modify the key/value service to handle duplicates correctly.
+//2. Modify client.go to cope with a failed primary.
+//   If the current primary doesn't respond, or doesn't think it's the primary,
+//   have the client consult the viewservice (in case the primary has changed) and try again.
+//   Sleep for viewservice.PingInterval between re-tries to avoid burning up too much CPU time.
+
 import "viewservice"
 import "net/rpc"
 import "fmt"
 
 import "crypto/rand"
 import "math/big"
-
+import "time"
 
 type Clerk struct {
 	vs *viewservice.Clerk
 	// Your declarations here
+	server string
+	me     string
 }
 
 // this may come in handy.
@@ -25,10 +36,11 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck := new(Clerk)
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
+	ck.me = me
+	ck.Consult()
 
 	return ck
 }
-
 
 //
 // call() sends an RPC to the rpcname handler on server srv
@@ -74,8 +86,17 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
+	args := &GetArgs{Key: key}
+	var reply GetReply
 
-	return "???"
+	for OK != reply.Err {
+		ok := call(ck.server, "PBServer.Get", args, &reply)
+		if ErrWrongServer == reply.Err || ErrUanbleForward == reply.Err || false == ok {
+			ck.Consult()
+			time.Sleep(viewservice.PingInterval)
+		}
+	}
+	return reply.Value
 }
 
 //
@@ -84,6 +105,16 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
+	args := &PutAppendArgs{Key: key, Value: value, Operator: op, Rand: nrand()}
+	var reply PutAppendReply
+
+	for OK != reply.Err {
+		ok := call(ck.server, "PBServer.PutAppend", args, &reply)
+		if ErrWrongServer == reply.Err || ErrUanbleForward == reply.Err || false == ok {
+			ck.Consult()
+			time.Sleep(viewservice.PingInterval)
+		}
+	}
 }
 
 //
@@ -100,4 +131,13 @@ func (ck *Clerk) Put(key string, value string) {
 //
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+// *new fuction
+func (ck *Clerk) Consult() error {
+	currentView, _ := ck.vs.Get()
+	if currentView.Primary != ck.server {
+		ck.server = currentView.Primary
+	}
+	return nil
 }
