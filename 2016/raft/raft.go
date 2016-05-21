@@ -481,7 +481,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
-	rf.role = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.leaderId = -1
@@ -507,7 +506,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//! set seed at the beginning
 	rand.Seed(time.Now().UnixNano())
 
-	rf.changeRole()
+	rf.changeRole(Follower)
 	go rf.startElectTimer()
 	go rf.applyEntry(applyCh)
 
@@ -521,25 +520,21 @@ func (rf *Raft) applyEntry(ch chan ApplyMsg) {
 		}
 		msg := <- rf.chanCommitted
 		ch <- msg
-		log.Println(rf.me, msg.Index, msg.Command)
+		//log.Println(rf.me, msg.Index, msg.Command)
 	}
 }
 
-func (rf *Raft) leaderReInit() {
+func (rf *Raft) changeRole(role Role) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	for i := range rf.peers {
-		rf.nextIndex[i] = len(rf.logTable)
-		rf.matchIndex[i] = 0
-	}
-}
-
-func (rf *Raft) changeRole() {
-	//! use state machine
+	rf.role = role
 	switch rf.role {
 	case Leader:
 		log.Println(rf.me, "run as leader")
-		rf.leaderReInit()
+		for i := range rf.peers {
+			rf.nextIndex[i] = len(rf.logTable)
+			rf.matchIndex[i] = 0
+		}
 		go rf.runAsLeader()
 	case Candidate:
 		log.Println(rf.me, "run as candidate")
@@ -553,46 +548,35 @@ func (rf *Raft) changeRole() {
 func (rf *Raft) runAsLeader() {
 	go rf.doHeartbeat()
 	for rf.role == Leader {
-		select {
-		case role := <- rf.chanRole:
-			if role == Follower {
-				rf.role = role
-			}
+		role := <- rf.chanRole
+		if role == Follower {
+			go rf.changeRole(Follower)
+			break
 		}
 	}
-	rf.changeRole()
 }
 
 func (rf *Raft) runAsCandidate() {
 	for rf.role == Candidate {
 		chanQuitElect := make(chan bool)
 		go rf.startElection(chanQuitElect)
-		select {
-		case role := <- rf.chanRole:
-			switch role {
-			case Leader:
-				rf.role = role
-			case Candidate:
-				close(chanQuitElect)
-			case Follower:
-				rf.role = role
-				close(chanQuitElect)
-			}
+		role := <- rf.chanRole
+		close(chanQuitElect)
+		if role == Leader || role == Follower {
+			go rf.changeRole(role)
+			break
 		}
 	}
-	rf.changeRole()
 }
 
 func (rf *Raft) runAsFollower() {
 	for rf.role == Follower {
-		select {
-		case role := <- rf.chanRole:
-			if role == Candidate {
-				rf.role = role
-			}
+		role := <- rf.chanRole
+		if role == Candidate {
+			go rf.changeRole(Candidate)
+			break
 		}
 	}
-	rf.changeRole()
 }
 
 // once an entry  from the current term has been committed in this way,
@@ -740,7 +724,6 @@ func (rf *Raft) startElectTimer() {
 				electTimer.Stop()
 			} else {
 				log.Println(rf.me, "is logically timeout")
-				rf.setVotedFor(-1)
 				rf.chanRole <- Candidate
 				rf.resetElectTimer(electTimer)
 			}
