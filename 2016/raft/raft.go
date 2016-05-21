@@ -89,11 +89,6 @@ type Raft struct {
 	nextIndex   []int
 	matchIndex  []int
 
-	// For state transform
-	chanTimeout		chan bool
-	chanElected 	chan bool
-	chanLagged		chan bool
-
 	// For communication
 	chanRole		chan Role
 	chanCommitted	chan ApplyMsg
@@ -276,7 +271,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.chanLagged <- true
+		rf.chanRole <- Follower
 	}
 
 	reply.Term = args.Term
@@ -322,29 +317,27 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	// Your code here.
 	rf.mu.Lock()
 	defer  rf.mu.Unlock()
-	currentTerm := rf.currentTerm
-	if args.Term < currentTerm {
-		reply.Term = currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
 	//! update current term and only one leader granted in one term
-	if currentTerm < args.Term {
+	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.leaderId = args.LeaderId
-		rf.chanLagged <-true
+		rf.chanRole <- Follower
 	}
 
 	rf.chanHeartbeat <- true
-	reply.Term = currentTerm
+	reply.Term = args.Term
 
 	if len(rf.logTable) <= args.PrevLogIndex || rf.logTable[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
-
 	if len(args.Entries) != 0 {
 		// append entries
 		reply.Success = true
@@ -358,6 +351,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.logTable = append(rf.logTable, args.Entries[0])
 		}
 	}
+
 	rf.updateFollowCommit(args.LeaderCommit, args.PrevLogIndex + 1)
 }
 
@@ -404,7 +398,7 @@ func (rf *Raft) doAppendEntries(server int) {
 			if reply.Term > args.Term {
 				rf.setCurrentTerm(reply.Term)
 				rf.setVotedFor(-1)
-				rf.chanLagged <- true
+				rf.chanRole <- Follower
 				return
 			}
 			if isAppend {
@@ -487,6 +481,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.role = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.leaderId = -1
@@ -499,14 +494,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers), len(peers))
 
 	rf.chanHeartbeat = make(chan bool)
-	rf.chanElected = make(chan bool)
-	rf.chanLagged = make(chan bool)
+	rf.chanGrantVote = make(chan bool)
 
 	rf.chanRole = make(chan Role)
 	rf.chanCommitted = make(chan ApplyMsg)
-
-	rf.chanTimeout = make(chan bool)
-	rf.chanGrantVote = make(chan bool)
 
 	rf.muFollower = make([]sync.Mutex, len(peers))
 
@@ -516,8 +507,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//! set seed at the beginning
 	rand.Seed(time.Now().UnixNano())
 
-	go rf.changeRole()
-	rf.chanRole <- Follower
+	rf.changeRole()
 	go rf.startElectTimer()
 	go rf.applyEntry(applyCh)
 
@@ -545,69 +535,64 @@ func (rf *Raft) leaderReInit() {
 }
 
 func (rf *Raft) changeRole() {
-	for {
-		rf.role = <- rf.chanRole
-		//! use state machine
-		switch rf.role {
-		case Leader:
-			log.Println(rf.me, "run as leader")
-			rf.leaderReInit()
-			go rf.runAsLeader()
-		case Candidate:
-			log.Println(rf.me, "run as candidate")
-			go rf.runAsCandidate()
-		case Follower:
-			log.Println(rf.me, "run as follower")
-			go rf.runAsFollower()
-		}
+	//! use state machine
+	switch rf.role {
+	case Leader:
+		log.Println(rf.me, "run as leader")
+		rf.leaderReInit()
+		go rf.runAsLeader()
+	case Candidate:
+		log.Println(rf.me, "run as candidate")
+		go rf.runAsCandidate()
+	case Follower:
+		log.Println(rf.me, "run as follower")
+		go rf.runAsFollower()
 	}
 }
 
 func (rf *Raft) runAsLeader() {
 	go rf.doHeartbeat()
-	isLeader := true
-	for isLeader {
+	for rf.role == Leader {
 		select {
-		case <- rf.chanLagged:
-			log.Println(rf.me, "is lagged")
-			rf.chanRole <- Follower
-			isLeader = false
+		case role := <- rf.chanRole:
+			if role == Follower {
+				rf.role = role
+			}
 		}
 	}
+	rf.changeRole()
 }
 
 func (rf *Raft) runAsCandidate() {
-	isCandidate := true
-	for isCandidate {
+	for rf.role == Candidate {
 		chanQuitElect := make(chan bool)
 		go rf.startElection(chanQuitElect)
 		select {
-		case <- rf.chanElected:
-			rf.chanRole <- Leader
-			isCandidate = false
-		case <- rf.chanTimeout:
-			chanQuitElect <- true
-		case <- rf.chanLagged:
-			log.Println(rf.me, "is lagged")
-			chanQuitElect <- true
-			rf.chanRole <- Follower
-			isCandidate = false
+		case role := <- rf.chanRole:
+			switch role {
+			case Leader:
+				rf.role = role
+			case Candidate:
+				close(chanQuitElect)
+			case Follower:
+				rf.role = role
+				close(chanQuitElect)
+			}
 		}
 	}
-
+	rf.changeRole()
 }
 
 func (rf *Raft) runAsFollower() {
-	isFollower := true
-	for isFollower {
+	for rf.role == Follower {
 		select {
-		case <- rf.chanTimeout:
-			rf.chanRole <- Candidate
-			isFollower = false
-		case <- rf.chanLagged:
-			log.Println(rf.me, "is lagged")
+		case role := <- rf.chanRole:
+			if role == Candidate {
+				rf.role = role
+			}
 		}
 	}
+	rf.changeRole()
 }
 
 // once an entry  from the current term has been committed in this way,
@@ -688,13 +673,11 @@ func (rf *Raft) startElection(chanQuitElect chan bool) {
 	// 1. increment current term
 	// 2. vote for self
 	// 3. reset election timer
-	currentTerm := rf.getCurrentTerm()
-	currentTerm++
-	rf.setCurrentTerm(currentTerm)
-	rf.setVotedFor(rf.me)
-	args.Term = currentTerm
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
-	args.LastLogIndex = rf.getCommitIndex()
+	args.LastLogIndex = rf.commitIndex
 	args.LastLogTerm = rf.logTable[args.LastLogIndex].Term
 
 	// 4. send RequestVote RPC to all other servers
@@ -705,10 +688,10 @@ func (rf *Raft) startElection(chanQuitElect chan bool) {
 			go func (index int) {
 				var reply RequestVoteReply
 				rf.sendRequestVote(index, args, &reply)
-				if reply.Term > args.Term {
+				if args.Term < reply.Term {
 					rf.setCurrentTerm(reply.Term)
 					rf.setVotedFor(-1)
-					rf.chanLagged <- true
+					rf.chanRole <- Follower
 					return
 				} else if reply.VoteGranted {
 					chanGather <- true
@@ -719,20 +702,21 @@ func (rf *Raft) startElection(chanQuitElect chan bool) {
 		}
 	}
 
-	countVote := 0
-	countTotal := 0
+	yes, no, countTotal := 0, 0, 0
 	isLoop := true
 	for isLoop {
 		select {
 		case ok := <- chanGather:
 			countTotal++
 			if ok {
-				countVote++
+				yes++
+			} else {
+				no++
 			}
-			if countVote > len(rf.peers) / 2 {
-				rf.chanElected <- true
+			if yes > len(rf.peers) / 2 {
+				rf.chanRole <- Leader
 				isLoop = false
-			} else if countTotal == len(rf.peers) {
+			} else if no > len(rf.peers) / 2 {
 				isLoop = false
 			}
 		case <- chanQuitElect:
@@ -752,14 +736,13 @@ func (rf *Raft) startElectTimer() {
 		case <- rf.chanGrantVote:
 			rf.resetElectTimer(electTimer)
 		case <-electTimer.C:
-			if rf.getRole() != Leader {
-				log.Println(rf.me, "is logically timeout")
-				rf.resetElectTimer(electTimer)
-				rf.setVotedFor(-1)
-				rf.chanTimeout <- true
-			} else {
-				//! stop leader's timer
+			if rf.role == Leader {
 				electTimer.Stop()
+			} else {
+				log.Println(rf.me, "is logically timeout")
+				rf.setVotedFor(-1)
+				rf.chanRole <- Candidate
+				rf.resetElectTimer(electTimer)
 			}
 		}
 	}
