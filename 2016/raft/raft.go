@@ -261,7 +261,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -276,18 +275,20 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term = args.Term
 
+	//! denies its vote if its own log is more up-to-date than that of the candidate
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		reply.VoteGranted = false
-	}else if len(rf.logTable)-1 < args.LastLogIndex ||
-			(len(rf.logTable)-1 == args.LastLogIndex &&
-			rf.logTable[args.LastLogIndex].Term == args.LastLogTerm) {
-		//! candidate's log should be at least as up-to-dates as receiver's log
+	} else if rf.logTable[len(rf.logTable)-1].Term > args.LastLogTerm {	//! term
+		reply.VoteGranted = false
+	} else if len(rf.logTable)-1 > args.LastLogIndex &&					//! index
+			rf.logTable[len(rf.logTable)-1].Term == args.LastLogTerm {
+		reply.VoteGranted = false
+	}else {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.chanGrantVote <- true
 		log.Println(rf.me, "granted vote to", args.CandidateId)
-	} else {
-		reply.VoteGranted = false
+		log.Println(len(rf.logTable), args.LastLogIndex, rf.logTable[len(rf.logTable)-1].Term, args.LastLogTerm)
 	}
 }
 
@@ -322,7 +323,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		reply.Success = false
 		return
 	}
-
 	//! update current term and only one leader granted in one term
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
@@ -338,6 +338,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		reply.Success = false
 		return
 	}
+	//log.Println(rf.me, "receive append from", args.LeaderId, args.PrevLogIndex+1)
 	if len(args.Entries) != 0 {
 		// append entries
 		reply.Success = true
@@ -351,7 +352,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.logTable = append(rf.logTable, args.Entries[0])
 		}
 	}
-
 	rf.updateFollowCommit(args.LeaderCommit, args.PrevLogIndex + 1)
 }
 
@@ -520,7 +520,7 @@ func (rf *Raft) applyEntry(ch chan ApplyMsg) {
 		}
 		msg := <- rf.chanCommitted
 		ch <- msg
-		//log.Println(rf.me, msg.Index, msg.Command)
+		log.Println(rf.me, msg.Index, msg.Command)
 	}
 }
 
@@ -632,6 +632,7 @@ func (rf *Raft) doHeartbeat() {
 			go func() {
 				heartbeatTimer := time.NewTimer(RaftHeartbeatPeriod)
 				for rf.getRole() == Leader {
+					rf.chanHeartbeat <- true
 					rf.updateLeaderCommit()
 					heartbeatTimer.Reset(RaftHeartbeatPeriod)
 					<-heartbeatTimer.C
@@ -661,7 +662,7 @@ func (rf *Raft) startElection(chanQuitElect chan bool) {
 	rf.votedFor = rf.me
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
-	args.LastLogIndex = rf.commitIndex
+	args.LastLogIndex = len(rf.logTable) - 1
 	args.LastLogTerm = rf.logTable[args.LastLogIndex].Term
 
 	// 4. send RequestVote RPC to all other servers
@@ -720,13 +721,9 @@ func (rf *Raft) startElectTimer() {
 		case <- rf.chanGrantVote:
 			rf.resetElectTimer(electTimer)
 		case <-electTimer.C:
-			if rf.role == Leader {
-				electTimer.Stop()
-			} else {
-				log.Println(rf.me, "is logically timeout")
-				rf.chanRole <- Candidate
-				rf.resetElectTimer(electTimer)
-			}
+			log.Println(rf.me, "is logically timeout")
+			rf.chanRole <- Candidate
+			rf.resetElectTimer(electTimer)
 		}
 	}
 }
