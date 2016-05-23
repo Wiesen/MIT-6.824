@@ -252,6 +252,10 @@ type AppendEntriesReply struct {
 	// Your data here.
 	Term    int
 	Success bool
+	// optimized
+	FailTerm int
+	FailIndex int
+
 }
 
 //
@@ -333,9 +337,24 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	rf.chanHeartbeat <- true
 	reply.Term = args.Term
-
-	if len(rf.logTable) <= args.PrevLogIndex || rf.logTable[args.PrevLogIndex].Term != args.PrevLogTerm {
+	// optimized for backing quickly
+	if len(rf.logTable) <= args.PrevLogIndex {
 		reply.Success = false
+		reply.FailTerm = args.PrevLogTerm
+		failIndex := len(rf.logTable) - 1
+		for rf.logTable[failIndex].Term == reply.FailTerm {
+			failIndex--
+		}
+		reply.FailIndex = failIndex
+		return
+	} else if rf.logTable[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		reply.FailTerm = rf.logTable[args.PrevLogIndex].Term
+		failIndex := args.PrevLogIndex
+		for rf.logTable[failIndex].Term == reply.FailTerm {
+			failIndex--
+		}
+		reply.FailIndex = failIndex
 		return
 	}
 	//log.Println(rf.me, "receive append from", args.LeaderId, args.PrevLogIndex+1)
@@ -405,9 +424,13 @@ func (rf *Raft) doAppendEntries(server int) {
 				if reply.Success {
 					rf.matchIndex[server] = rf.nextIndex[server]
 					rf.nextIndex[server]++
-				} else if rf.nextIndex[server]-1 > rf.matchIndex[server] {
+				} else {
 					//! out of range
-					rf.nextIndex[server]--
+					if reply.FailIndex > rf.matchIndex[server] {
+						rf.nextIndex[server] = reply.FailIndex
+					} else {
+						rf.nextIndex[server] = rf.matchIndex[server] + 1
+					}
 				}
 			}
 		} else {
