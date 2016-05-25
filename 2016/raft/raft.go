@@ -98,7 +98,7 @@ type Raft struct {
 	chanGrantVote	chan bool
 
 	// For leader to control follower
-	muFollower      []sync.Mutex
+	chanAppend      []chan bool
 }
 
 /*-------------------- get -------------------*/
@@ -292,7 +292,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		rf.chanGrantVote <- true
 		log.Println(rf.me, "granted vote to", args.CandidateId)
-		log.Println(len(rf.logTable), args.LastLogIndex, rf.logTable[len(rf.logTable)-1].Term, args.LastLogTerm)
 	}
 }
 
@@ -382,18 +381,20 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 		c <- ok
 	}()
 	select {
-	case res := <- c:
-		ret = res
+	case ret = <- c:
 	case <-time.After(RaftHeartbeatPeriod):
 		ret = false
+		//log.Println("append timeout")
 	}
 	return ret
 }
 
 func (rf *Raft) doAppendEntries(server int) {
 	//! make a lock for every follower to serialize
-	rf.muFollower[server].Lock()
-	defer rf.muFollower[server].Unlock()
+	select {
+	case <- rf.chanAppend[server]:
+	default:return
+	}
 	isAppend := true
 	for isAppend && rf.getRole() == Leader {
 		var args AppendEntriesArgs
@@ -406,19 +407,20 @@ func (rf *Raft) doAppendEntries(server int) {
 		// Entries
 		lastLogIndex := len(rf.logTable) - 1
 		if (lastLogIndex >= rf.nextIndex[server]) {
+			//log.Println(rf.me, "send append to", server, rf.nextIndex[server])
 			args.Entries = append(args.Entries, rf.logTable[rf.nextIndex[server]])
 		} else {
+			//log.Println(rf.me, "send heartbeat to", server)
 			isAppend = false
 		}
 		// Reply
 		var reply AppendEntriesReply
 		if rf.sendAppendEntries(server, args, &reply) {
-			//log.Println(rf.me, "receive reply from", server, reply.Success)
 			if reply.Term > args.Term {
 				rf.setCurrentTerm(reply.Term)
 				rf.setVotedFor(-1)
 				rf.chanRole <- Follower
-				return
+				break
 			}
 			if isAppend {
 				if reply.Success {
@@ -434,9 +436,10 @@ func (rf *Raft) doAppendEntries(server int) {
 				}
 			}
 		} else {
-			return
+			break
 		}
 	}
+	rf.chanAppend[server] <- true
 }
 
 //
@@ -521,7 +524,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.chanRole = make(chan Role)
 	rf.chanCommitted = make(chan ApplyMsg)
 
-	rf.muFollower = make([]sync.Mutex, len(peers))
+	rf.chanAppend = make([]chan bool, len(peers))
+	for i := range rf.chanAppend {
+		rf.chanAppend[i] = make(chan bool, 1)
+		rf.chanAppend[i] <- true
+	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -573,7 +580,7 @@ func (rf *Raft) runAsLeader() {
 	for rf.role == Leader {
 		role := <- rf.chanRole
 		if role == Follower {
-			go rf.changeRole(Follower)
+			defer rf.changeRole(Follower)
 			break
 		}
 	}
@@ -586,7 +593,7 @@ func (rf *Raft) runAsCandidate() {
 		role := <- rf.chanRole
 		close(chanQuitElect)
 		if role == Leader || role == Follower {
-			go rf.changeRole(role)
+			defer rf.changeRole(role)
 			break
 		}
 	}
@@ -596,7 +603,7 @@ func (rf *Raft) runAsFollower() {
 	for rf.role == Follower {
 		role := <- rf.chanRole
 		if role == Candidate {
-			go rf.changeRole(Candidate)
+			defer rf.changeRole(Candidate)
 			break
 		}
 	}
