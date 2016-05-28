@@ -418,6 +418,7 @@ func TestPersist1(t *testing.T) {
 	}
 
 	cfg.one(12, servers)
+	fmt.Printf("Pass 12\n")
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -425,6 +426,7 @@ func TestPersist1(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(13, servers)
+	fmt.Printf("Pass 13\n")
 
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)

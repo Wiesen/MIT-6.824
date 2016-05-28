@@ -23,6 +23,8 @@ import (
 	"log"
 	"time"
 	"math/rand"
+	"bytes"
+	"encoding/gob"
 )
 
 // import "bytes"
@@ -197,6 +199,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logTable)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -209,6 +218,13 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.logTable)
 }
 
 
@@ -265,6 +281,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -321,6 +338,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	// Your code here.
 	rf.mu.Lock()
 	defer  rf.mu.Unlock()
+	defer rf.persist()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -420,6 +438,7 @@ func (rf *Raft) doAppendEntries(server int) {
 				rf.setCurrentTerm(reply.Term)
 				rf.setVotedFor(-1)
 				rf.chanRole <- Follower
+				rf.persist()
 				break
 			}
 			if isAppend {
@@ -466,6 +485,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = true
 		entry := LogEntry{Command:command, Term:term};
 		rf.logTable = append(rf.logTable, entry);
+		rf.persist()
 		go rf.Replica()
 	}
 	return index, term, isLeader
@@ -694,7 +714,7 @@ func (rf *Raft) startElection(chanQuitElect chan bool) {
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.logTable) - 1
 	args.LastLogTerm = rf.logTable[args.LastLogIndex].Term
-
+	rf.persist()
 	// 4. send RequestVote RPC to all other servers
 	chanGather := make(chan bool, len(rf.peers))
 	chanGather <- true
@@ -706,6 +726,7 @@ func (rf *Raft) startElection(chanQuitElect chan bool) {
 				if args.Term < reply.Term {
 					rf.setCurrentTerm(reply.Term)
 					rf.setVotedFor(-1)
+					rf.persist()
 					rf.chanRole <- Follower
 					return
 				} else if reply.VoteGranted {
