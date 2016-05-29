@@ -570,7 +570,7 @@ func (rf *Raft) applyEntry(ch chan ApplyMsg) {
 		}
 		msg := <- rf.chanCommitted
 		ch <- msg
-		log.Println(rf.me, msg.Index, msg.Command)
+		//log.Println(rf.me, msg.Index, msg.Command)
 	}
 }
 
@@ -772,7 +772,7 @@ func (rf *Raft) startElectTimer() {
 		case <- rf.chanGrantVote:
 			rf.resetElectTimer(electTimer)
 		case <-electTimer.C:
-			log.Println(rf.me, "is logically timeout")
+			//log.Println(rf.me, "is logically timeout")
 			rf.chanRole <- Candidate
 			rf.resetElectTimer(electTimer)
 		}
