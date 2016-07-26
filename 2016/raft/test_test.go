@@ -122,7 +122,7 @@ func TestFailAgree(t *testing.T) {
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(104, servers-1)
 	cfg.one(105, servers-1)
-	fmt.Printf("Pass 105\n")
+	fmt.Printf("Pass 105, connected %d\n", (leader + 1) % servers)
 	// failed server re-connected
 	cfg.connect((leader + 1) % servers)
 
@@ -667,7 +667,7 @@ func TestFigure8Unreliable(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
+	fmt.Printf("Test: Figure 8 (unreliable) final\n")
 	cfg.one(rand.Int()%10000, servers)
 
 	fmt.Printf("  ... Passed\n")

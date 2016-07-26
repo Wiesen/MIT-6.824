@@ -385,6 +385,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
+				//fmt.Printf("Test: start [%d]\n", cmd)
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
