@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -17,11 +18,18 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType	string
+	Args	interface{}
+}
+
+type Result struct {
+	opType	string
+	args  interface{}
+	reply interface{}
 }
 
 type RaftKV struct {
@@ -33,15 +41,76 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	database map[string]string		// for storing data
+	ack 	map[int64]int			// for recording requestId of every clients
+	messages map[int]chan Result	// for transferring result according to request
 }
-
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	index, _, isLeader := kv.rf.Start(Op{OpType: "Get", Args: *args})
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+
+	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
+
+	select {
+	case msg := <- chanMsg:
+		if recArgs, ok := msg.args.(GetArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != recArgs.ClientId || args.RequestId != recArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				*reply = msg.reply.(GetReply)
+				reply.WrongLeader = false
+			}
+		}
+	case <- time.After(time.Second * 1):
+		reply.WrongLeader = true
+	}
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	//DPrintf("PutAppend(): key[%s], value[%s]", args.Key, args.Value)
+	index, _, isLeader := kv.rf.Start(Op{OpType: "PutAppend", Args: *args})
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	kv.mu.Lock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+
+	}
+	chanMsg := kv.messages[index]
+	kv.mu.Unlock()
+
+	select {
+	case msg := <- chanMsg:
+		if tmpArgs, ok := msg.args.(PutAppendArgs); !ok {
+			reply.WrongLeader = true
+		} else {
+			if args.ClientId != tmpArgs.ClientId || args.RequestId != tmpArgs.RequestId {
+				reply.WrongLeader = true
+			} else {
+				reply.Err = msg.reply.(PutAppendReply).Err
+				reply.WrongLeader = false
+			}
+		}
+	case <- time.After(time.Second * 1):
+		reply.WrongLeader = true
+	}
 }
 
 //
@@ -71,15 +140,111 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
 
+	//!!! Register error!
+	gob.Register(PutAppendArgs{})
+	gob.Register(GetArgs{})
+	gob.Register(PutAppendReply{})
+	gob.Register(GetReply{})
+
 	kv := new(RaftKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
 	// Your initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.database = make(map[string]string)
+	kv.ack = make(map[int64]int)
+	kv.messages = make(map[int]chan Result)
 
+	go kv.Update()
 
 	return kv
+}
+
+// ! added by Yang
+// receive command form raft to update database
+func (kv *RaftKV) Update() {
+	for true {
+		msg := <- kv.applyCh
+		request := msg.Command.(Op)
+		//!!! value and type is a type of variable
+		var result Result
+		var clientId int64
+		var requestId int
+		if request.OpType == "Get" {
+			args := request.Args.(GetArgs)
+			clientId = args.ClientId
+			requestId = args.RequestId
+			result.args = args
+		} else {
+			args := request.Args.(PutAppendArgs)
+			clientId = args.ClientId
+			requestId = args.RequestId
+			result.args = args
+		}
+		//!!! even duplicated, the request have to be sent a reply
+		result.reply = kv.Apply(request, kv.isDuplicated(clientId, requestId))
+		result.opType = request.OpType
+
+		kv.sendResult(msg.Index, result);
+	}
+}
+
+func (kv *RaftKV) sendResult(index int, result Result) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, ok := kv.messages[index]; !ok {
+		kv.messages[index] = make(chan Result, 1)
+	} else {
+		select {
+		case <- kv.messages[index]:
+		default:
+		}
+	}
+	kv.messages[index] <- result
+}
+
+
+func (kv *RaftKV) Apply(request Op, isDuplicated bool) interface{} {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	switch request.Args.(type) {
+	case GetArgs:
+		var reply GetReply
+		args := request.Args.(GetArgs)
+		if value, ok := kv.database[args.Key]; ok {
+			reply.Err = OK
+			reply.Value = value
+		} else {
+			reply.Err = ErrNoKey
+		}
+		//DPrintf("[%d] Apply get request: [%d]", kv.me, args.RequestId)
+		return reply
+	case PutAppendArgs:
+		var reply PutAppendReply
+		args := request.Args.(PutAppendArgs)
+		//!!! attention of the operated variable
+		if !isDuplicated {
+			if args.Op == "Put" {
+				kv.database[args.Key] = args.Value
+			} else {
+				kv.database[args.Key] += args.Value
+			}
+		}
+		reply.Err = OK
+		//DPrintf("[%d] Apply putappend request: [%d]", kv.me, args.RequestId)
+		return reply
+	}
+	return nil
+}
+
+func (kv *RaftKV) isDuplicated(clientId int64, requestId int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if value, ok := kv.ack[clientId]; ok && value >= requestId {
+		return true
+	}
+	kv.ack[clientId] = requestId
+	return false
 }
