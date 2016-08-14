@@ -7,9 +7,10 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -44,6 +45,7 @@ type RaftKV struct {
 	database map[string]string		// for storing data
 	ack 	map[int64]int			// for recording requestId of every clients
 	messages map[int]chan Result	// for transferring result according to request
+	persister *raft.Persister
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
@@ -135,11 +137,10 @@ func (kv *RaftKV) Kill() {
 // in order to allow Raft to garbage-collect its log. if maxraftstate is -1,
 // you don't need to snapshot.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *RaftKV {
+func  StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *RaftKV {
 	// call gob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
-
 	//!!! Register error!
 	gob.Register(PutAppendArgs{})
 	gob.Register(GetArgs{})
@@ -152,12 +153,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// Your initialization code here.
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.database = make(map[string]string)
 	kv.ack = make(map[int64]int)
 	kv.messages = make(map[int]chan Result)
 
+	//!!! be careful of channel with 0 capacity
 	go kv.Update()
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	return kv
 }
@@ -167,31 +169,63 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *RaftKV) Update() {
 	for true {
 		msg := <- kv.applyCh
-		request := msg.Command.(Op)
-		//!!! value and type is a type of variable
-		var result Result
-		var clientId int64
-		var requestId int
-		if request.OpType == "Get" {
-			args := request.Args.(GetArgs)
-			clientId = args.ClientId
-			requestId = args.RequestId
-			result.args = args
+		if msg.UseSnapshot {
+			kv.UseSnapShot(msg.Snapshot)
 		} else {
-			args := request.Args.(PutAppendArgs)
-			clientId = args.ClientId
-			requestId = args.RequestId
-			result.args = args
+			request := msg.Command.(Op)
+			//!!! value and type is a type of variable
+			var result Result
+			var clientId int64
+			var requestId int
+			if request.OpType == "Get" {
+				args := request.Args.(GetArgs)
+				clientId = args.ClientId
+				requestId = args.RequestId
+				result.args = args
+			} else {
+				args := request.Args.(PutAppendArgs)
+				clientId = args.ClientId
+				requestId = args.RequestId
+				result.args = args
+			}
+			result.opType = request.OpType
+			//!!! even duplicated, the request have to be sent a reply
+			result.reply = kv.Apply(request, kv.IsDuplicated(clientId, requestId))
+			kv.SendResult(msg.Index, result)
+			kv.CheckSnapshot(msg.Index)
 		}
-		//!!! even duplicated, the request have to be sent a reply
-		result.reply = kv.Apply(request, kv.isDuplicated(clientId, requestId))
-		result.opType = request.OpType
-
-		kv.sendResult(msg.Index, result);
 	}
 }
 
-func (kv *RaftKV) sendResult(index int, result Result) {
+func (kv *RaftKV) UseSnapShot(snapshot []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	var LastIncludedIndex int
+	var LastIncludedTerm int
+	kv.database = make(map[string]string)
+	kv.ack = make(map[int64]int)
+
+	r := bytes.NewBuffer(snapshot)
+	d := gob.NewDecoder(r)
+	d.Decode(&LastIncludedIndex)
+	d.Decode(&LastIncludedTerm)
+	d.Decode(&kv.database)
+	d.Decode(&kv.ack)
+}
+
+func (kv * RaftKV) CheckSnapshot(index int) {
+	if kv.maxraftstate != -1 && float64(kv.rf.GetPersistSize()) > float64(kv.maxraftstate)*0.8 {
+		w := new(bytes.Buffer)
+		e := gob.NewEncoder(w)
+		e.Encode(kv.database)
+		e.Encode(kv.ack)
+		data := w.Bytes()
+		go kv.rf.StartSnapshot(data, index)
+	}
+}
+
+func (kv *RaftKV) SendResult(index int, result Result) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if _, ok := kv.messages[index]; !ok {
@@ -239,7 +273,7 @@ func (kv *RaftKV) Apply(request Op, isDuplicated bool) interface{} {
 	return nil
 }
 
-func (kv *RaftKV) isDuplicated(clientId int64, requestId int) bool {
+func (kv *RaftKV) IsDuplicated(clientId int64, requestId int) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if value, ok := kv.ack[clientId]; ok && value >= requestId {

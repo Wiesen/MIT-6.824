@@ -46,11 +46,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	ck.mu.Lock()
-	//defer ck.mu.Unlock()
+	defer ck.mu.Unlock()
 	args := GetArgs {Key: key, ClientId: ck.clientId, RequestId: ck.requestId}
 	ck.requestId++
-	defer ck.mu.Unlock()
-	DPrintf("[%d] send GET with [%d]", ck.clientId, args.RequestId)
+	//ck.mu.Unlock()
+	//DPrintf("[%d] send GET with [%d]", ck.clientId, args.RequestId)
 	//!!! dead loop
 	ret := ""
 	for i := ck.leader; true; i = (i + 1) % len(ck.servers) {
@@ -60,7 +60,7 @@ func (ck *Clerk) Get(key string) string {
 			if !reply.WrongLeader {
 				ck.leader = i
 				if reply.Err == OK {
-					DPrintf("[%d] Receive GET reply with [%d]", ck.clientId, args.RequestId)
+					//DPrintf("[%d] Receive GET reply with [%d]", ck.clientId, args.RequestId)
 					ret = reply.Value
 					break
 				} else {
@@ -82,11 +82,11 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	ck.mu.Lock()
-	//defer ck.mu.Unlock()
+	defer ck.mu.Unlock()
 	args := PutAppendArgs {Key: key, Value: value, Op: op, ClientId: ck.clientId, RequestId: ck.requestId}
 	ck.requestId++
-	defer ck.mu.Unlock()
-	DPrintf("[%d] send PUTAPPEND with [%d]", ck.clientId, args.RequestId)
+	//ck.mu.Unlock()
+	//DPrintf("[%d] send PUTAPPEND with [%d]", ck.clientId, args.RequestId)
 	//!!! dead loop
 	for i := ck.leader; true; i = (i + 1) % len(ck.servers) {
 		//!!! Attention: where to declare a variable
@@ -94,7 +94,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		server := ck.servers[i]
 		if server.Call("RaftKV.PutAppend", &args, &reply) {
 			if !reply.WrongLeader {
-				DPrintf("[%d] Receive PUTAPPEND reply with [%d]", ck.clientId, args.RequestId)
+				//DPrintf("[%d] Receive PUTAPPEND reply with [%d]", ck.clientId, args.RequestId)
 				ck.leader = i
 				return
 			}
