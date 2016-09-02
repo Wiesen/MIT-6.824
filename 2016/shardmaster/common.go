@@ -14,7 +14,7 @@ package shardmaster
 // #0 is the initial configuration, with no groups and all shards
 // assigned to group 0 (the invalid group).
 //
-// A GID is a replica group ID. GIDs must be uniqe and > 0.
+// A GID is a replica group ID. GIDs must be unique and > 0.
 // Once a GID joins, and leaves, it should never join again.
 //
 // You will need to add fields to the RPC arguments.
@@ -35,11 +35,21 @@ const (
 	OK = "OK"
 )
 
+const (
+	Join = "Join"
+	Leave = "Leave"
+	Move = "Move"
+	Query = "Query"
+)
+
 type Err string
 
 type JoinArgs struct {
 	GID     int      // unique replica group ID
 	Servers []string // group server ports
+					 // add by Yang
+	ClientId	int64
+	RequestId	int
 }
 
 type JoinReply struct {
@@ -49,6 +59,9 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GID int
+	// add by Yang
+	ClientId	int64
+	RequestId	int
 }
 
 type LeaveReply struct {
@@ -59,6 +72,9 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+	// add by Yang
+	ClientId	int64
+	RequestId	int
 }
 
 type MoveReply struct {
@@ -68,6 +84,9 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+			// add by Yang
+	ClientId	int64
+	RequestId	int
 }
 
 type QueryReply struct {
