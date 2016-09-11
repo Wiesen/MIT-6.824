@@ -236,10 +236,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	gob.Register(QueryReply{})
 	sm.cfgNum = 0
 	sm.ack = make(map[int64]int)
-	sm.messages = make(map[int]chan Result)
+	sm.messages = make(map[int]chan Result, 1)
+	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	go sm.Update()
-	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	return sm
 }
@@ -362,6 +362,7 @@ func (sm *ShardMaster) NextConfig() *Config {
 	}
 	sm.cfgNum += 1
 	sm.configs = append(sm.configs, c)
+	//!!! return reference
 	return &sm.configs[sm.cfgNum]
 }
 
@@ -395,9 +396,7 @@ func (sm *ShardMaster) CountShards(cfg *Config) map[int][]int {
 		shardsCount[k] = []int{}
 	}
 	for k, v := range cfg.Shards {
-		//if v != 0 {
-			shardsCount[v] = append(shardsCount[v], k)
-		//}
+		shardsCount[v] = append(shardsCount[v], k)
 	}
 	return shardsCount
 }

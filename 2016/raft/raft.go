@@ -24,6 +24,8 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
+	"os"
+	"runtime/debug"
 )
 
 const RaftElectionTimeoutLow = 150 * time.Millisecond
@@ -138,7 +140,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
 	d.Decode(&rf.logTable)
-	DPrintf("[%d] read persist [%d]", rf.me, rf.logTable[len(rf.logTable)-1].Index)
+	//DPrintf("[%d] read persist [%d]", rf.me, rf.logTable[len(rf.logTable)-1].Index)
 }
 
 func (rf *Raft) GetPersistSize() int {
@@ -381,8 +383,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	DPrintf("[%d] receive append from [%d]: [%d] -> [%d]",
-		rf.me, args.LeaderId, args.PrevLogIndex+1, args.PrevLogIndex+len(args.Entry)+1)
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -406,16 +407,16 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	if args.PrevLogIndex < baseLogIndex {
 		reply.Success = false
 		reply.NextIndex = baseLogIndex + 1
-		DPrintf("unmatch in server [%d]: AppendEntries: args.PrevLogIndex [%d] < baseLogIndex [%d]",
-			rf.me, args.PrevLogIndex, baseLogIndex)
+		//DPrintf("unmatch in server [%d]: AppendEntries: args.PrevLogIndex [%d] < baseLogIndex [%d]",
+		//	rf.me, args.PrevLogIndex, baseLogIndex)
 		return
 	}
 
 	if baseLogIndex + len(rf.logTable) <= args.PrevLogIndex {
 		reply.Success = false
 		reply.NextIndex = baseLogIndex + len(rf.logTable)
-		DPrintf("unmatch in server [%d]: AppendEntries: totallength [%d] < PrevLogIndex [%d]",
-			rf.me, reply.NextIndex-1, args.PrevLogIndex)
+		//DPrintf("unmatch in server [%d]: AppendEntries: totallength [%d] < PrevLogIndex [%d]",
+		//	rf.me, reply.NextIndex-1, args.PrevLogIndex)
 		return
 	}
 
@@ -431,20 +432,21 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		}
 		// reply.NextIndex == baseLogIndex when need snapshot
 		reply.NextIndex = nextIndex + 1
-		DPrintf("unmatch in server [%d]: AppendEntries: backing to [%d]",
-			rf.me, reply.NextIndex)
+		//DPrintf("unmatch in server [%d]: AppendEntries: backing to [%d]",
+		//	rf.me, reply.NextIndex)
 		return
 	}
 
 	var updateLogIndex int
 	if len(args.Entry) != 0 {
 		//!!! erase those conflicting with a new one all that following
+		DPrintln(rf.me, "receive append:", args)
 		for i, entry := range args.Entry {
 			curIndex := entry.Index - baseLogIndex
 			if curIndex < len(rf.logTable) {
 				if curIndex < baseLogIndex || curIndex > rf.logTable[len(rf.logTable)-1].Index {
-					DPrintf("logTable: from [%d] to [%d] while PreLogIndex [%d] and entry index [%d]",
-						baseLogIndex, rf.logTable[len(rf.logTable) - 1].Index, args.PrevLogIndex, entry.Index)
+					//DPrintf("logTable: from [%d] to [%d] while PreLogIndex [%d] and entry index [%d]",
+					//	baseLogIndex, rf.logTable[len(rf.logTable) - 1].Index, args.PrevLogIndex, entry.Index)
 				}
 				if entry.Term != rf.logTable[curIndex].Term {
 					//DPrintf("[%d] in term [%d] replace entry [%d] [%d]",
@@ -532,6 +534,12 @@ func (rf *Raft) doAppendEntries(server int) {
 			args.Term = rf.currentTerm
 			args.LeaderId = rf.me
 			args.PrevLogIndex = rf.nextIndex[server] - 1
+			if args.PrevLogIndex - baseLogIndex < 0 || args.PrevLogIndex - baseLogIndex >= len(rf.logTable) {
+				DPrintln("base:", baseLogIndex, "largest:", rf.logTable[len(rf.logTable)-1].Index,
+					"PrevLogIndex:", args.PrevLogIndex, "nextIndex:", rf.nextIndex[server])
+				debug.PrintStack()
+				os.Exit(-1)
+			}
 			args.PrevLogTerm = rf.logTable[args.PrevLogIndex - baseLogIndex].Term
 			args.LeaderCommit = rf.commitIndex
 			// Entries
@@ -550,41 +558,45 @@ func (rf *Raft) doAppendEntries(server int) {
 			// Reply
 			var reply AppendEntriesReply
 			if rf.sendAppendEntries(server, args, &reply) {
-				//!!!after a long time: in case of role changing while appending
-				if rf.role != Leader {
-					return
-				}
-				if args.Term != rf.currentTerm || reply.Term > args.Term {
-					if reply.Term > args.Term {
-						rf.mu.Lock()
-						rf.currentTerm = reply.Term
-						rf.votedFor = -1
-						rf.role = Follower
-						rf.chanRole <- Follower
-						rf.persist()
-						rf.mu.Unlock()
-					}
-					return
-				}
-				//!!!after a long time: heartbeat RPC reply fail index as well
-				if reply.Success {
-					rf.matchIndex[server] = reply.NextIndex - 1
-					rf.nextIndex[server] = reply.NextIndex
-				} else {
-					//! out of range
-					////rf.matchIndex[server] = 0
-					//if reply.NextIndex > rf.matchIndex[server] + 1 {
-					//	rf.nextIndex[server] = reply.NextIndex
-					//} else {
-					//	rf.nextIndex[server] = rf.matchIndex[server] + 1
-					//}
-					rf.nextIndex[server] = reply.NextIndex
-				}
+				rf.DoAppendEntriesReply(server, args, reply)
 				return
 			} else {
-				DPrintf("doAppendEntries: no reply from follower [%d]", server)
+				//DPrintf("doAppendEntries: no reply from follower [%d]", server)
 			}
 		}
+	}
+}
+
+func (rf *Raft) DoAppendEntriesReply(server int, args AppendEntriesArgs, reply AppendEntriesReply) {
+	//!!!after a long time: in case of role changing while appending
+	if rf.role != Leader {
+		return
+	}
+	if args.Term != rf.currentTerm || reply.Term > args.Term {
+		if reply.Term > args.Term {
+			rf.mu.Lock()
+			rf.currentTerm = reply.Term
+			rf.votedFor = -1
+			rf.role = Follower
+			rf.chanRole <- Follower
+			rf.persist()
+			rf.mu.Unlock()
+		}
+		return
+	}
+	//!!!after a long time: heartbeat RPC reply fail index as well
+	if reply.Success {
+		rf.matchIndex[server] = reply.NextIndex - 1
+		rf.nextIndex[server] = reply.NextIndex
+	} else {
+		//! out of range
+		////rf.matchIndex[server] = 0
+		//if reply.NextIndex > rf.matchIndex[server] + 1 {
+		//	rf.nextIndex[server] = reply.NextIndex
+		//} else {
+		//	rf.nextIndex[server] = rf.matchIndex[server] + 1
+		//}
+		rf.nextIndex[server] = reply.NextIndex
 	}
 }
 
@@ -681,23 +693,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) changeRole() {
+	role := rf.role
 	for true {
-		switch rf.role {
+		switch role {
 		case Leader:
-			DPrintf("[%d] run as leader", rf.me)
+			//DPrintf("[%d] run as leader", rf.me)
 			for i := range rf.peers {
 				rf.nextIndex[i] = rf.logTable[len(rf.logTable)-1].Index + 1
 				rf.matchIndex[i] = 0
 			}
 			go rf.doHeartbeat()
-			<-rf.chanRole
+			role = <-rf.chanRole
 		case Candidate:
 			chanQuitElect := make(chan bool)
 			go rf.startElection(chanQuitElect)
-			<-rf.chanRole
+			role = <-rf.chanRole
 			close(chanQuitElect)
 		case Follower:
-			<-rf.chanRole
+			role = <-rf.chanRole
 		}
 	}
 }
@@ -732,7 +745,7 @@ func (rf *Raft) updateLeaderCommit() {
 	//! update the log added in previous term
 	baseIndex := rf.logTable[0].Index
 	for i := oldIndex + 1; i <= newIndex; i++ {
-		//DPrintf("[%d] leader apply: [%d] [%d]", rf.me, i, rf.logTable[i-baseIndex].Command)
+		DPrintln(rf.me, "commit entry", rf.logTable[i-baseIndex].Command)
 		rf.chanCommitted <- ApplyMsg{Index:i, Command:rf.logTable[i-baseIndex].Command}
 		rf.lastApplied = i
 	}
