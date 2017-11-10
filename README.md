@@ -1,7 +1,5 @@
 # MIT-6.824
 
-Note：2015 lab1通过所有的test case后，由于2016发布因此搁置2015
-
 Introduction
 ---
 
@@ -15,10 +13,10 @@ Introduction
 Details
 ---
 
-[lab2 Raft Consensus Algorithm Implementation](http://wiesen.github.io/post/MIT-6.824-lab2-Raft-Consensus-Algorithm-Implementation/)
+[lab2 Raft Consensus Algorithm Implementation](http://wiesen.github.io/post/mit-6.824-lab2-raft-consensus-algorithm-implementation/)
 
-[lab3 Fault-Tolerant Key/Value Service Implementation](http://wiesen.github.io/post/MIT-6.824-lab3-Fault-Tolerant-KVService-Implementation/)
+[lab3 Fault-Tolerant Key/Value Service Implementation](http://wiesen.github.io/post/mit-6.824-lab3-fault-tolerant-kvservice-implementation/)
 
-[Lab 4 Sharded KeyValue Service Implementation](http://wiesen.github.io/post/MIT-6.824-Lab4-Sharded-KeyValue-Service/)
+[Lab 4 Sharded KeyValue Service Implementation](http://wiesen.github.io/post/mit-6.824-lab4-sharded-keyvalue-service/)
 
 
